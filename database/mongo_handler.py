@@ -10,12 +10,10 @@ db = client[DB_NAME]
 # --- Timezone (IST) ---
 IST = ZoneInfo("Asia/Kolkata")
 
-
 # --- Collection Helpers ---
 def get_collection(name: str):
     """Return a MongoDB collection by name."""
     return db[name]
-
 
 def ensure_indexes(collection_name: str):
     """
@@ -28,7 +26,6 @@ def ensure_indexes(collection_name: str):
         print(f"✅ Index ensured on '{collection_name}' (asin)")
     except Exception as e:
         print(f"❌ Failed to create index on '{collection_name}': {e}")
-
 
 # --- Upsert Logic ---
 def upsert_product(doc: dict, collection_name: str):
@@ -48,6 +45,8 @@ def upsert_product(doc: dict, collection_name: str):
         reviews = doc.get("reviews") or 0
         image_url = doc.get("image_url") or "https://via.placeholder.com/150"
         product_url = doc.get("product_url") or f"https://www.amazon.in/dp/{asin}"
+        tags = doc.get("tags") or []  # ✅ NEW FIELD
+        brand = doc.get("brand") or "Unknown"
 
         doc_to_store = {
             "asin": asin,
@@ -57,18 +56,19 @@ def upsert_product(doc: dict, collection_name: str):
             "reviews": reviews,
             "image_url": image_url,
             "product_url": product_url,
-            # Store IST time
+            "tags": tags,  # ✅ Include tags
+            "brand": brand,
             "last_updated": datetime.now(IST).isoformat()
+            
         }
 
         try:
             collection.update_one({"asin": asin}, {"$set": doc_to_store}, upsert=True)
-            print(f"✅ Stored in '{collection_name}': {title} | ASIN: {asin}")
+            print(f"✅ Stored in '{collection_name}': {title} | ASIN: {asin} | Brand: {brand}")
         except Exception as e:
             print(f"❌ MongoDB error for ASIN={asin}: {e}")
     else:
         print(f"⚠️ Skipping incomplete product: ASIN={asin}, Title={title}")
-
 
 # --- Connection Cleanup ---
 def close_connection():

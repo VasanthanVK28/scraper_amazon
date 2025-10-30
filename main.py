@@ -4,9 +4,9 @@ from config.settings import CATEGORIES
 
 async def main():
     for query, collection in CATEGORIES.items():
-        #print(f"\n🚀 Starting scrape for '{query}' → collection '{collection}'")
+        print(f"\n🚀 Starting scrape for '{query}' → collection '{collection}'")
         await scrape_amazon(query, collection_name=collection, max_pages=5)
-        #print(f"✅ Finished scraping {query}\n")
+        print(f"✅ Finished scraping {query}\n")
 
 if __name__ == "__main__":
     asyncio.run(main())
