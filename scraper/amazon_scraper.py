@@ -5,6 +5,7 @@ from config.settings import SEARCH_URL, HEADLESS
 from database.mongo_handler import upsert_product
 
 
+
 # ================== TAG CLASSIFIER ==================
 def classify_tags(query: str, title: str | None) -> list[str]:
     """Return tags based on query and title content."""
@@ -205,6 +206,29 @@ async def scrape_amazon(query="mobile", collection_name="products", max_pages=10
                     break
             else:
                 break
-
+                
         await browser.close()
     print(f"\n✅ Completed scraping for '{query}' into collection '{collection_name}'.")
+# ================== ENTRY POINT ==================
+if __name__ == "__main__":
+    import sys
+    query = sys.argv[1] if len(sys.argv) > 1 else "mobile"
+    pages = int(sys.argv[2]) if len(sys.argv) > 2 else 5
+
+    # Automatically choose collection name based on query
+    collection_map = {
+        "mobile": "mobiles",
+        "mobiles": "mobiles",
+        "laptop": "laptops",
+        "laptops": "laptops",
+        "toy": "toys",
+        "toys": "toys",
+        "shirt": "shirts",
+        "shirts": "shirts",
+        "sofa": "sofas",
+        "sofas": "sofas",
+    }
+    collection_name = collection_map.get(query.lower(), "products")
+
+    import asyncio
+    asyncio.run(scrape_amazon(query=query, collection_name=collection_name, max_pages=pages))
