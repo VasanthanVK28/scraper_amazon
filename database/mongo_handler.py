@@ -31,21 +31,20 @@ def ensure_indexes(collection_name: str):
 def upsert_product(doc: dict, collection_name: str):
     """
     Insert or update a product document in MongoDB.
-    Uses the ASIN as the unique identifier within the given collection.
+    Uses ASIN as the unique identifier within the given collection.
     """
     asin = doc.get("asin")
     title = doc.get("title")
-    price = doc.get("price")
+    price = doc.get("price") or 0  # Allow missing price
 
-    if asin and title and price:
+    if asin and title:
         collection = db[collection_name]
 
-        # Normalize optional fields
         rating = doc.get("rating") or 0.0
         reviews = doc.get("reviews") or 0
         image_url = doc.get("image_url") or "https://via.placeholder.com/150"
         product_url = doc.get("product_url") or f"https://www.amazon.in/dp/{asin}"
-        tags = doc.get("tags") or []  # ✅ NEW FIELD
+        tags = doc.get("tags") or []
         brand = doc.get("brand") or "Unknown"
 
         doc_to_store = {
@@ -56,10 +55,9 @@ def upsert_product(doc: dict, collection_name: str):
             "reviews": reviews,
             "image_url": image_url,
             "product_url": product_url,
-            "tags": tags,  # ✅ Include tags
+            "tags": tags,
             "brand": brand,
             "last_updated": datetime.now(IST).isoformat()
-            
         }
 
         try:

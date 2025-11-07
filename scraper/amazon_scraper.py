@@ -1,234 +1,135 @@
+# scraper/amazon_scraper.py
+
 import asyncio
 import re
 from playwright.async_api import async_playwright
 from config.settings import SEARCH_URL, HEADLESS
-from database.mongo_handler import upsert_product
+from database.mongo_handler import upsert_product, ensure_indexes
 
 
-
-# ================== TAG CLASSIFIER ==================
+# ---------- Helper: classify tags ----------
 def classify_tags(query: str, title: str | None) -> list[str]:
-    """Return tags based on query and title content."""
-    query = (query or "").lower()
-    title = (title or "").lower()
-
-    # Explicit mapping by query keyword
-    tag_map = {
-        "mobile": ["mobile", "electronics", "phone"],
-        "laptop": ["laptop", "electronics", "computer"],
-        "sofa": ["sofa", "furniture", "home"],
-        "shirt": ["shirt", "fashion", "clothing"],
-        "toys": ["toys", "kids", "entertainment"],
-        "toy": ["toys", "kids", "entertainment"],
-    }
-    if query in tag_map:
-        return tag_map[query]
-
-    # Title-based fallback
-    if any(word in title for word in ["sofa", "couch", "settee", "divan"]):
-        return ["sofa", "furniture", "home"]
-    if any(word in title for word in ["shirt", "tshirt", "tee", "kurta", "blouse", "top"]):
-        return ["shirt", "fashion", "clothing"]
-    if any(word in title for word in ["toy", "truck", "doll", "lego", "car", "puzzle"]):
-        return ["toys", "kids", "entertainment"]
-    if any(word in title for word in ["mobile", "phone", "smartphone", "redmi", "samsung"]):
-        return ["mobile", "electronics", "phone"]
-    if any(word in title for word in ["laptop", "macbook", "notebook", "hp", "dell"]):
-        return ["laptop", "electronics", "computer"]
-
-    # Default fallback
-    return [query]
+    q = (query or "").lower()
+    t = (title or "").lower()
+    if "mobile" in q or "phone" in t:
+        return ["mobile", "electronics"]
+    if "laptop" in q or "laptop" in t:
+        return ["laptop", "electronics"]
+    if "toy" in q or "toy" in t:
+        return ["toys", "kids"]
+    if "sofa" in q or "couch" in t:
+        return ["sofa", "furniture"]
+    if "shirt" in q or "tshirt" in t or "top" in t:
+        return ["shirt", "fashion"]
+    return [q]
 
 
-# ================== MAIN SCRAPER ==================
-async def scrape_amazon(query="mobile", collection_name="products", max_pages=10):
+# ---------- Core Scraper ----------
+async def scrape_amazon(query="mobile", collection_name="products", max_products=5):
+    """Scrape Amazon search results for a given query and save products in MongoDB."""
+    ensure_indexes(collection_name)  # ensure unique index on ASIN
+
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=HEADLESS)
+        browser = await p.chromium.launch(headless=HEADLESS, args=["--no-sandbox"])
         page = await browser.new_page()
-
         url = SEARCH_URL.format(query=query)
+
         print(f"🔎 Navigating to {url}")
         await page.goto(url, timeout=60000, wait_until="domcontentloaded")
+        await page.wait_for_timeout(3000)
 
-        page_num = 1
-        while True:
-            print(f"\n📄 Scraping page {page_num} for {query}...")
-            await page.wait_for_selector("div.s-main-slot div[data-asin]")
-            products = await page.query_selector_all("div.s-main-slot div[data-asin]")
+        product_selector = "div.s-main-slot div[data-component-type='s-search-result']"
+        await page.wait_for_selector(product_selector)
+        products = await page.query_selector_all(product_selector)
+        print(f"📦 Found {len(products)} products for '{query}'")
 
-            printed_one = False
-            for product in products:
-                try:
-                    asin = await product.get_attribute("data-asin")
-                    if not asin:
-                        continue
+        scraped_count = 0
 
-                    # --- Title ---
-                    title_el = (
-                        await product.query_selector("h2 a span")
-                        or await product.query_selector("h2 a")
-                        or await product.query_selector("h2")
-                    )
-                    title = await title_el.inner_text() if title_el else None
+        for product in products:
+            if scraped_count >= max_products:
+                break
 
-                    # --- Price ---
-                    price = None
-                    price_whole = await product.query_selector("span.a-price-whole")
-                    if price_whole:
-                        price_text = await price_whole.inner_text()
-                        price_fraction = await product.query_selector("span.a-price-fraction")
-                        if price_fraction:
-                            price_text += "." + await price_fraction.inner_text()
-                        try:
-                            price = float(price_text.replace(",", ""))
-                        except ValueError:
-                            pass
-
-                    # --- Rating ---
-                    rating = None
-                    rating_el = await product.query_selector("span.a-icon-alt")
-                    if rating_el:
-                        try:
-                            rating = float((await rating_el.inner_text()).split()[0])
-                        except ValueError:
-                            pass
-
-                    # --- Reviews ---
-                    reviews = 0
-                    review_selectors = [
-                        "span.s-underline-text",
-                        "span.a-size-base.s-underline-text",
-                        "a.a-link-normal.s-underline-text.s-link-style",
-                    ]
-                    for selector in review_selectors:
-                        reviews_el = await product.query_selector(selector)
-                        if reviews_el:
-                            reviews_text = (await reviews_el.inner_text()).strip()
-                            match = re.search(r"\b[\d,]+\b", reviews_text)
-                            if match:
-                                reviews = int(match.group(0).replace(",", ""))
-                                break
-
-                    # --- Image ---
-                    image_url = None
-                    image_el = await product.query_selector("img.s-image")
-                    if image_el:
-                        image_url = await image_el.get_attribute("src")
-
-                       # --- Brand ---
-            
-                    brand = None
-                    try:
-                         
-                        # ✅ 1. Try explicit brand heading (appears above title)
-                        brand_el = await product.query_selector("h5.s-line-clamp-1 span, h5.s-line-clamp-1")
-                        if brand_el:
-                            text = (await brand_el.inner_text()).strip()
-                            if text and not any(bad in text.lower() for bad in ["bought", "deal", "offer", "price", "mrp","bought in past month","amazon choice","sponsored","deal","limited","%","off","offer"]):
-                                brand = text
-
-                                # ✅ 2. If still missing, extract from title start (e.g., "Samsung Galaxy S24 Ultra")
-
-                        if not brand and title:
-                            possible = title.strip().split()[0]  # take first word
-                            if possible.isalpha() and len(possible) >= 2:
-                                brand = possible
-
-                    except Exception as e:
-                        print(f"⚠️ Brand extraction failed for ASIN={asin}: {e}")
-
-                        # ✅ Default fallback
-
-                    if not brand:
-                        brand = "Unknown"
-
-
-
-
-                    # --- Product URL ---
-                    product_url = None
-                    product_url_el = await product.query_selector("a[href*='/dp/'], a[href*='/gp/']")
-                    if product_url_el:
-                        href = await product_url_el.get_attribute("href")
-                        if href:
-                            if href.startswith("http"):
-                                product_url = href.split("?")[0]
-                            else:
-                                product_url = "https://www.amazon.in" + href.split("?")[0]
-
-                    if not (title and price):
-                        continue
-
-                    # --- Tags (updated) ---
-                    tags = classify_tags(query, title)
-
-                    # --- Product Document ---
-                    product_doc = {
-                        "asin": asin,
-                        "title": title,
-                        "price": price,
-                        "rating": rating,
-                        "reviews": reviews,
-                        "image_url": image_url,
-                        "product_url": product_url,
-                        "tags": tags,
-                        "brand": brand,
-                    }
-
-                    if not printed_one:
-                        print("\n🛒 Scraped Product:")
-                        print(f"   ASIN: {asin}")
-                        print(f"   Title: {title}")
-                        print(f"   Price: ₹{price}")
-                        print(f"   Rating: {rating}")
-                        print(f"   Reviews: {reviews}")
-                        print(f"   Image: {image_url}")
-                        print(f"   URL: {product_url}")
-                        print(f"   Tags: {product_doc['tags']}")
-                        print(f"   Brand: {brand}")
-
-                        printed_one = True
-
-                    # Save to MongoDB
-                    upsert_product(product_doc, collection_name)
-
-                except Exception as e:
-                    print(f"⚠️ Skipped one product due to error: {e}")
+            try:
+                asin = await product.get_attribute("data-asin")
+                if not asin:
                     continue
 
-            # --- Pagination ---
-            next_button = await page.query_selector("a.s-pagination-next")
-            if next_button and await next_button.is_enabled():
-                await next_button.click()
-                await page.wait_for_selector("div.s-main-slot div[data-asin]", timeout=60000)
-                page_num += 1
-                if page_num > max_pages:
-                    break
-            else:
-                break
-                
+                title_el = await product.query_selector("h2 span")
+                title = (await title_el.inner_text()).strip() if title_el else None
+                if not title:
+                    continue
+
+                # PRICE
+                price = None
+                price_el = await product.query_selector("span.a-price > span.a-offscreen")
+                if price_el:
+                    price_text = (await price_el.inner_text()).replace("₹", "").replace(",", "").strip()
+                    try:
+                        price = float(price_text)
+                    except ValueError:
+                        pass
+
+                # RATING
+                rating = None
+                rating_el = await product.query_selector("span.a-icon-alt")
+                if rating_el:
+                    rating_text = await rating_el.inner_text()
+                    m = re.search(r"[\d.]+", rating_text)
+                    if m:
+                        rating = float(m.group(0))
+
+                # REVIEWS
+                reviews = 0
+                review_el = await product.query_selector("span.a-size-base.s-underline-text")
+                if review_el:
+                    review_text = await review_el.inner_text()
+                    m = re.search(r"[\d,]+", review_text)
+                    if m:
+                        reviews = int(m.group(0).replace(",", ""))
+
+                # IMAGE
+                img_el = await product.query_selector("img.s-image")
+                image_url = await img_el.get_attribute("src") if img_el else None
+
+                # PRODUCT LINK
+                link_el = await product.query_selector("h2 a")
+                product_url = None
+                if link_el:
+                    href = await link_el.get_attribute("href")
+                    if href:
+                        if not href.startswith("http"):
+                            href = "https://www.amazon.in" + href.split("?")[0]
+                        product_url = href
+
+                # BRAND + TAGS
+                brand = title.split()[0] if title else "Unknown"
+                tags = classify_tags(query, title)
+
+                product_doc = {
+                    "asin": asin,
+                    "title": title,
+                    "price": price,
+                    "rating": rating,
+                    "reviews": reviews,
+                    "image_url": image_url,
+                    "product_url": product_url,
+                    "tags": tags,
+                    "brand": brand,
+                    "query": query,
+                }
+
+                upsert_product(product_doc, collection_name)
+                scraped_count += 1
+                print(f"🛒 [{scraped_count}/{max_products}] {title[:80]} | ₹{price if price else 'N/A'}")
+
+            except Exception as e:
+                print(f"⚠️ Error parsing product: {e}")
+
         await browser.close()
-    print(f"\n✅ Completed scraping for '{query}' into collection '{collection_name}'.")
-# ================== ENTRY POINT ==================
+        print(f"✅ Completed scraping {scraped_count} products for '{query}'")
+        return scraped_count
+
+
+# ---------- Run standalone ----------
 if __name__ == "__main__":
-    import sys
-    query = sys.argv[1] if len(sys.argv) > 1 else "mobile"
-    pages = int(sys.argv[2]) if len(sys.argv) > 2 else 5
-
-    # Automatically choose collection name based on query
-    collection_map = {
-        "mobile": "mobiles",
-        "mobiles": "mobiles",
-        "laptop": "laptops",
-        "laptops": "laptops",
-        "toy": "toys",
-        "toys": "toys",
-        "shirt": "shirts",
-        "shirts": "shirts",
-        "sofa": "sofas",
-        "sofas": "sofas",
-    }
-    collection_name = collection_map.get(query.lower(), "products")
-
-    import asyncio
-    asyncio.run(scrape_amazon(query=query, collection_name=collection_name, max_pages=pages))
+    asyncio.run(scrape_amazon("mobiles"))

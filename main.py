@@ -1,85 +1,87 @@
 # main.py
+
 import asyncio
-from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-from apscheduler.schedulers.background import BackgroundScheduler
-from apscheduler.triggers.cron import CronTrigger
-from apscheduler.triggers.interval import IntervalTrigger
 from datetime import datetime
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from pymongo import MongoClient
+from bson import ObjectId
+from config.settings import MONGO_URI, DB_NAME, CATEGORIES
 from scraper.amazon_scraper import scrape_amazon
-from config.settings import CATEGORIES
 
-app = FastAPI()
+# ---------------- MongoDB setup ----------------
+client = MongoClient(MONGO_URI)
+db = client[DB_NAME]
+schedule_collection = db["scrape_schedules"]
 
-# Allow frontend (React) to connect
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # or specify frontend URL in production
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# ---------------- Helper: Update schedule status ----------------
+def set_schedule_status(schedule_id, is_running=False, status=None):
+    """Update the running state and status of a scraping schedule."""
+    update_query = {"is_running": is_running}
+    if status:
+        update_query["status"] = status
+    schedule_collection.update_one({"_id": ObjectId(schedule_id)}, {"$set": update_query})
 
-scheduler = BackgroundScheduler()
-scheduler.start()
+# ---------------- Run Scraper ----------------
+async def run_scrape(schedule):
+    schedule_id = schedule["_id"]
+    frequency = schedule["frequency"]
 
-class SchedulePayload(BaseModel):
-    scrapeFrequency: str  # hourly / daily / weekly
-    scrapeTime: str = "03:00"
-    scrapeDay: str = "sun"
+    print(f"\n⏱️ Running scrape for schedule '{frequency}'...")
+    set_schedule_status(schedule_id, is_running=True, status="active")
 
-# Run scraper for all categories
-async def scrape_all():
-    print(f"[{datetime.now()}] 🔍 Starting scraping job...")
-    for query, collection in CATEGORIES.items():
-        print(f"→ Scraping '{query}' into '{collection}' collection...")
-        await scrape_amazon(query, collection_name=collection, max_pages=5)
-        print(f"✓ Finished scraping '{query}'")
-    print(f"[{datetime.now()}] ✅ Scraping job finished.\n")
-
-# Sync wrapper for APScheduler
-def start_scraper_job():
-    asyncio.run(scrape_all())
-
-@app.post("/api/schedule-scrape")
-def schedule_scrape(payload: SchedulePayload):
     try:
-        scheduler.remove_all_jobs()
-        hour, minute = map(int, payload.scrapeTime.split(":"))
+        for query, collection_name in CATEGORIES.items():
+            print(f"🔹 Scraping up to 5 products for category: {query}")
+            scraped_count = await scrape_amazon(query=query, collection_name=collection_name, max_products=5)
+            print(f"✅ Scraped {scraped_count} products for '{collection_name}'")
 
-        if payload.scrapeFrequency == "hourly":
-            scheduler.add_job(start_scraper_job, trigger=IntervalTrigger(hours=1), id="scrape_job")
-            freq = "hourly"
-        elif payload.scrapeFrequency == "daily":
-            scheduler.add_job(start_scraper_job, trigger=CronTrigger(hour=hour, minute=minute), id="scrape_job")
-            freq = f"daily at {payload.scrapeTime}"
-        elif payload.scrapeFrequency == "weekly":
-            scheduler.add_job(
-                start_scraper_job,
-                trigger=CronTrigger(day_of_week=payload.scrapeDay, hour=hour, minute=minute),
-                id="scrape_job"
-            )
-            freq = f"weekly on {payload.scrapeDay} at {payload.scrapeTime}"
-        else:
-            raise HTTPException(status_code=400, detail="Invalid frequency")
-
-        print(f"✅ Scraping job scheduled: {freq}")
-        return {"status": "success", "message": f"Scraping scheduled {freq}"}
+        set_schedule_status(schedule_id, is_running=False, status="complete")
+        print(f"✅ Completed scrape for schedule '{frequency}'")
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        set_schedule_status(schedule_id, is_running=False, status="failed")
+        print(f"❌ Failed scrape for schedule '{frequency}': {e}")
 
+# ---------------- Check Schedules ----------------
+async def check_schedules():
+    """Check for active scraping schedules and trigger jobs."""
+    now = datetime.now()
+    current_time = now.strftime("%H:%M")
+    current_day = now.strftime("%a").lower()
 
-@app.get("/api/schedule-status")
-def get_schedule_status():
-    """Check what’s currently scheduled."""
-    jobs = scheduler.get_jobs()
-    if not jobs:
-        return {"scheduled": False, "message": "No active scraping job"}
-    job = jobs[0]
-    return {
-        "scheduled": True,
-        "next_run": str(job.next_run_time),
-        "trigger": str(job.trigger),
-    }
+    active_schedules = list(schedule_collection.find({"is_running": False}))
+    for schedule in active_schedules:
+        freq = schedule.get("frequency")
+        sched_time = schedule.get("time")
+        sched_day = schedule.get("day")
+
+        run = False
+        if freq == "hourly":
+            run = True
+        elif freq == "daily" and sched_time == current_time:
+            run = True
+        elif (
+            freq == "weekly"
+            and sched_day
+            and sched_time
+            and sched_day.lower() == current_day
+            and sched_time == current_time
+        ):
+            run = True
+
+        if run:
+            asyncio.create_task(run_scrape(schedule))
+
+# ---------------- Main Entry ----------------
+async def main():
+    scheduler = AsyncIOScheduler()
+    scheduler.add_job(check_schedules, "interval", minutes=1, coalesce=True)
+    scheduler.start()
+
+    print("🟢 Scheduler running (checks every 1 minute)...")
+
+    while True:
+        await asyncio.sleep(60)
+
+if __name__ == "__main__":
+    asyncio.run(main())
