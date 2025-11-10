@@ -1,5 +1,3 @@
-# scraper/amazon_scraper.py
-
 import asyncio
 import re
 from playwright.async_api import async_playwright
@@ -30,17 +28,45 @@ async def scrape_amazon(query="mobile", collection_name="products", max_products
     ensure_indexes(collection_name)  # ensure unique index on ASIN
 
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=HEADLESS, args=["--no-sandbox"])
-        page = await browser.new_page()
+        browser = await p.chromium.launch(
+            headless=HEADLESS,
+            args=["--no-sandbox", "--disable-blink-features=AutomationControlled"],
+        )
+        context = await browser.new_context(
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
+        )
+        page = await context.new_page()
         url = SEARCH_URL.format(query=query)
 
         print(f"🔎 Navigating to {url}")
         await page.goto(url, timeout=60000, wait_until="domcontentloaded")
-        await page.wait_for_timeout(3000)
+        await page.wait_for_timeout(4000)
 
-        product_selector = "div.s-main-slot div[data-component-type='s-search-result']"
-        await page.wait_for_selector(product_selector)
-        products = await page.query_selector_all(product_selector)
+        # 🧠 Try multiple selectors (Amazon layout changes often)
+        selectors = [
+            "div.s-main-slot div[data-component-type='s-search-result']",
+            "div[data-asin][data-component-type='s-search-result']",
+        ]
+
+        found_selector = None
+        for selector in selectors:
+            try:
+                await page.wait_for_selector(selector, timeout=30000)
+                found_selector = selector
+                break
+            except Exception:
+                continue
+
+        if not found_selector:
+            # 🧩 Take a screenshot to debug
+            await page.screenshot(path=f"debug_{query}.png")
+            html = await page.content()
+            if "robot" in html.lower() or "captcha" in html.lower():
+                print("🚫 Amazon blocked the scraper (CAPTCHA or Bot detection). Try rotating IP/User-Agent.")
+            raise Exception("Product list selector not found on the page.")
+
+        products = await page.query_selector_all(found_selector)
         print(f"📦 Found {len(products)} products for '{query}'")
 
         scraped_count = 0
@@ -54,6 +80,7 @@ async def scrape_amazon(query="mobile", collection_name="products", max_products
                 if not asin:
                     continue
 
+                # TITLE
                 title_el = await product.query_selector("h2 span")
                 title = (await title_el.inner_text()).strip() if title_el else None
                 if not title:
