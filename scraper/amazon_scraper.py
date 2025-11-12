@@ -1,9 +1,15 @@
 import asyncio
+import random
 import re
+from datetime import datetime
 from playwright.async_api import async_playwright
-from config.settings import SEARCH_URL, HEADLESS
+from config.settings import SEARCH_URL, HEADLESS, MONGO_URI, DB_NAME
 from database.mongo_handler import upsert_product, ensure_indexes
+from pymongo import MongoClient
 
+# ---------------- MongoDB client for last scrape updates ----------------
+client = MongoClient(MONGO_URI)
+db = client[DB_NAME]
 
 # ---------- Helper: classify tags ----------
 def classify_tags(query: str, title: str | None) -> list[str]:
@@ -21,10 +27,12 @@ def classify_tags(query: str, title: str | None) -> list[str]:
         return ["shirt", "fashion"]
     return [q]
 
-
 # ---------- Core Scraper ----------
 async def scrape_amazon(query="mobile", collection_name="products", max_products=5):
-    """Scrape Amazon search results for a given query and save products in MongoDB."""
+    """
+    Scrape Amazon search results for a given query,
+    save products in MongoDB, and update last scrape info.
+    """
     ensure_indexes(collection_name)  # ensure unique index on ASIN
 
     async with async_playwright() as p:
@@ -34,7 +42,7 @@ async def scrape_amazon(query="mobile", collection_name="products", max_products
         )
         context = await browser.new_context(
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-            "(KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
+                       "(KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
         )
         page = await context.new_page()
         url = SEARCH_URL.format(query=query)
@@ -59,7 +67,6 @@ async def scrape_amazon(query="mobile", collection_name="products", max_products
                 continue
 
         if not found_selector:
-            # 🧩 Take a screenshot to debug
             await page.screenshot(path=f"debug_{query}.png")
             html = await page.content()
             if "robot" in html.lower() or "captcha" in html.lower():
@@ -149,11 +156,25 @@ async def scrape_amazon(query="mobile", collection_name="products", max_products
                 scraped_count += 1
                 print(f"🛒 [{scraped_count}/{max_products}] {title[:80]} | ₹{price if price else 'N/A'}")
 
+                # ⏱️ Respect Amazon rate limits (5-10 seconds random delay)
+                await asyncio.sleep(random.uniform(5, 10))
+
             except Exception as e:
                 print(f"⚠️ Error parsing product: {e}")
 
         await browser.close()
         print(f"✅ Completed scraping {scraped_count} products for '{query}'")
+
+        # ---------------- Update last scrape details ----------------
+        db["scrape_schedules"].update_one(
+            {"query": query},
+            {"$set": {
+                "last_scraped": datetime.now(),
+                "last_scraped_count": scraped_count
+            }},
+            upsert=True
+        )
+
         return scraped_count
 
 
