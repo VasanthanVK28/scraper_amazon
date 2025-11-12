@@ -7,6 +7,7 @@ from pymongo import MongoClient
 from bson import ObjectId
 from config.settings import MONGO_URI, DB_NAME, CATEGORIES
 from scraper.amazon_scraper import scrape_amazon
+from utils.email_notifier import send_failure_email  # ✅ NEW IMPORT
 
 # ---------------- MongoDB setup ----------------
 client = MongoClient(MONGO_URI)
@@ -41,6 +42,9 @@ async def run_scrape(schedule):
     except Exception as e:
         set_schedule_status(schedule_id, is_running=False, status="failed")
         print(f"❌ Failed scrape for schedule '{frequency}': {e}")
+
+        # ✅ Send failure email
+        await send_failure_email(str(e), frequency)
 
 # ---------------- Check Schedules ----------------
 async def check_schedules():
