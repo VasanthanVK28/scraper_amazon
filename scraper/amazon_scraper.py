@@ -30,8 +30,8 @@ def classify_tags(query: str, title: str | None) -> list[str]:
 # ---------- Core Scraper ----------
 async def scrape_amazon(query="mobile", collection_name="products", max_products=5):
     """
-    Scrape Amazon search results for a given query,
-    save products in MongoDB, and update last scrape info.
+    Scrape Amazon search results for a given query and save products in MongoDB.
+    Does NOT update last_run in product documents — schedule handles last_run.
     """
     ensure_indexes(collection_name)  # ensure unique index on ASIN
 
@@ -165,19 +165,4 @@ async def scrape_amazon(query="mobile", collection_name="products", max_products
         await browser.close()
         print(f"✅ Completed scraping {scraped_count} products for '{query}'")
 
-        # ---------------- Update last scrape details ----------------
-        db["scrape_schedules"].update_one(
-            {"query": query},
-            {"$set": {
-                "last_scraped": datetime.now(),
-                "last_scraped_count": scraped_count
-            }},
-            upsert=True
-        )
-
-        return scraped_count
-
-
-# ---------- Run standalone ----------
-if __name__ == "__main__":
-    asyncio.run(scrape_amazon("mobiles"))
+        return scraped_count  # do NOT update last_run here

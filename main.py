@@ -1,6 +1,6 @@
 import asyncio
 import random
-from datetime import datetime, timedelta
+from datetime import datetime
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from pymongo import MongoClient
 from bson import ObjectId
@@ -26,15 +26,25 @@ def set_schedule_status(schedule_id, is_running=False, status=None, last_run=Non
 # ---------------- Run Scraper ----------------
 async def run_scrape(schedule):
     schedule_id = schedule["_id"]
-    frequency = schedule["frequency"]
+    frequency = schedule.get("frequency")
+    last_run = schedule.get("last_run")
+
+    if last_run:
+        print(f"🕒 Last run for this schedule: {last_run.strftime('%I:%M %p')}")
+        # Respect at least 10–20 seconds delay from last run
+        time_since_last = (datetime.now() - last_run).total_seconds()
+        if time_since_last < 10:
+            wait_time = random.randint(10, 20)
+            print(f"⏳ Waiting {wait_time} seconds to respect rate limits...")
+            await asyncio.sleep(wait_time)
 
     print(f"\n⏱️ Running scrape for schedule '{frequency}'...")
     set_schedule_status(schedule_id, is_running=True, status="active")
 
     try:
-        # Introduce random 10-20 seconds delay to avoid Amazon detection
+        # Random delay before starting scrape
         delay_seconds = random.randint(10, 20)
-        print(f"⏳ Waiting {delay_seconds} seconds before scraping...")
+        print(f"⏳ Initial delay: {delay_seconds} seconds to avoid detection")
         await asyncio.sleep(delay_seconds)
 
         for query, collection_name in CATEGORIES.items():
@@ -42,9 +52,10 @@ async def run_scrape(schedule):
             scraped_count = await scrape_amazon(query=query, collection_name=collection_name, max_products=5)
             print(f"✅ Scraped {scraped_count} products for '{collection_name}'")
 
-        # mark schedule as complete and store last_run timestamp
-        set_schedule_status(schedule_id, is_running=False, status="complete", last_run=datetime.now())
-        print(f"✅ Completed scrape for schedule '{frequency}'")
+        # Mark schedule as complete and update last_run
+        now = datetime.now()
+        set_schedule_status(schedule_id, is_running=False, status="complete", last_run=now)
+        print(f"✅ Completed scrape for schedule '{frequency}' | Last run updated to {now.strftime('%I:%M %p')}")
 
     except Exception as e:
         set_schedule_status(schedule_id, is_running=False, status="failed")
