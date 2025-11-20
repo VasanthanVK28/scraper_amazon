@@ -3,13 +3,8 @@ import random
 import re
 from datetime import datetime
 from playwright.async_api import async_playwright
-from config.settings import SEARCH_URL, HEADLESS, MONGO_URI, DB_NAME
+from config.settings import SEARCH_URL, HEADLESS
 from database.mongo_handler import upsert_product, ensure_indexes
-from pymongo import MongoClient
-
-# ---------------- MongoDB client for last scrape updates ----------------
-client = MongoClient(MONGO_URI)
-db = client[DB_NAME]
 
 # ---------- Helper: classify tags ----------
 def classify_tags(query: str, title: str | None) -> list[str]:
@@ -31,14 +26,13 @@ def classify_tags(query: str, title: str | None) -> list[str]:
 async def scrape_amazon(query="mobile", collection_name="products", max_products=5):
     """
     Scrape Amazon search results for a given query and save products in MongoDB.
-    Does NOT update last_run in product documents — schedule handles last_run.
     """
     ensure_indexes(collection_name)  # ensure unique index on ASIN
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(
             headless=HEADLESS,
-            args=["--no-sandbox", "--disable-blink-features=AutomationControlled"],
+            args=["--no-sandbox", "--disable-blink-features=AutomationControlled"]
         )
         context = await browser.new_context(
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -51,7 +45,7 @@ async def scrape_amazon(query="mobile", collection_name="products", max_products
         await page.goto(url, timeout=60000, wait_until="domcontentloaded")
         await page.wait_for_timeout(4000)
 
-        # 🧠 Try multiple selectors (Amazon layout changes often)
+        # Try multiple selectors
         selectors = [
             "div.s-main-slot div[data-component-type='s-search-result']",
             "div[data-asin][data-component-type='s-search-result']",
@@ -70,8 +64,8 @@ async def scrape_amazon(query="mobile", collection_name="products", max_products
             await page.screenshot(path=f"debug_{query}.png")
             html = await page.content()
             if "robot" in html.lower() or "captcha" in html.lower():
-                print("🚫 Amazon blocked the scraper (CAPTCHA or Bot detection). Try rotating IP/User-Agent.")
-            raise Exception("Product list selector not found on the page.")
+                print("🚫 Amazon blocked the scraper (CAPTCHA or Bot detection).")
+            raise Exception("Product list selector not found.")
 
         products = await page.query_selector_all(found_selector)
         print(f"📦 Found {len(products)} products for '{query}'")
@@ -107,8 +101,7 @@ async def scrape_amazon(query="mobile", collection_name="products", max_products
                 rating = None
                 rating_el = await product.query_selector("span.a-icon-alt")
                 if rating_el:
-                    rating_text = await rating_el.inner_text()
-                    m = re.search(r"[\d.]+", rating_text)
+                    m = re.search(r"[\d.]+", await rating_el.inner_text())
                     if m:
                         rating = float(m.group(0))
 
@@ -116,8 +109,7 @@ async def scrape_amazon(query="mobile", collection_name="products", max_products
                 reviews = 0
                 review_el = await product.query_selector("span.a-size-base.s-underline-text")
                 if review_el:
-                    review_text = await review_el.inner_text()
-                    m = re.search(r"[\d,]+", review_text)
+                    m = re.search(r"[\d,]+", await review_el.inner_text())
                     if m:
                         reviews = int(m.group(0).replace(",", ""))
 
@@ -130,10 +122,9 @@ async def scrape_amazon(query="mobile", collection_name="products", max_products
                 product_url = None
                 if link_el:
                     href = await link_el.get_attribute("href")
-                    if href:
-                        if not href.startswith("http"):
-                            href = "https://www.amazon.in" + href.split("?")[0]
-                        product_url = href
+                    if href and not href.startswith("http"):
+                        href = "https://www.amazon.in" + href.split("?")[0]
+                    product_url = href
 
                 # BRAND + TAGS
                 brand = title.split()[0] if title else "Unknown"
@@ -156,13 +147,11 @@ async def scrape_amazon(query="mobile", collection_name="products", max_products
                 scraped_count += 1
                 print(f"🛒 [{scraped_count}/{max_products}] {title[:80]} | ₹{price if price else 'N/A'}")
 
-                # ⏱️ Respect Amazon rate limits (5-10 seconds random delay)
-                await asyncio.sleep(random.uniform(5, 10))
+                await asyncio.sleep(random.uniform(5, 10))  # rate-limit
 
             except Exception as e:
                 print(f"⚠️ Error parsing product: {e}")
 
         await browser.close()
         print(f"✅ Completed scraping {scraped_count} products for '{query}'")
-
-        return scraped_count  # do NOT update last_run here
+        return scraped_count
